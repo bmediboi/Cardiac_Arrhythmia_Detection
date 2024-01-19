@@ -1,0 +1,176 @@
+library(ggplot2)
+library(dplyr)
+library(reshape2)
+library(caret)
+
+
+#read
+data<- read.csv("data_arrhythmia.csv",sep=';',header=TRUE,na.strings=c("?"))
+class_counts<-table(data$diagnosis)
+classes_to_remove <- names(class_counts[class_counts < 5])
+filtered_data <- data %>%
+  filter(!(diagnosis %in% classes_to_remove))
+
+data_arrhythmia<-filtered_data
+data_arrhythmia$diagnosis<-NULL
+null_values <- sapply(data_arrhythmia, function(x) sum(is.na(x)))
+na_counts <- null_values[null_values > 0]
+
+# Print the null values if there are any
+if (length(na_counts) > 0) {
+  print(na_counts)
+} else {
+  print("No null values found")
+}
+
+#barplot representation of null values
+
+ggplot(data = data.frame(Column = names(na_counts), NAs = na_counts), aes(x = Column, y = NAs)) +
+  geom_bar(stat = 'identity') +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = 'Columns', y = 'Number of NA Values', title = 'NA Values in Each Column')
+
+#Handling Missing Values
+# Heart rate
+heart_rate_mean <- mean(data_arrhythmia$heart_rate, na.rm = TRUE)
+data_arrhythmia$heart_rate[is.na(data_arrhythmia$heart_rate)] <- heart_rate_mean
+sum(is.na(data_arrhythmia$heart_rate))
+
+# dropping J Column
+
+data_arrhythmia$J<-NULL
+#View(data_arrhythmia)
+
+#P Column (KNN Imputation)
+library(VIM)
+
+# Perform KNN imputation
+imputed_data_p <- kNN(data_arrhythmia, variable='P', k=5)
+
+# Display the head of the imputed dataframe
+data_arrhythmia <- imputed_data_p
+sum(is.na(data_arrhythmia$P))
+
+#QRST
+median_QRST <- median(data_arrhythmia$QRST, na.rm = TRUE)
+data_arrhythmia$QRST[is.na(data_arrhythmia$QRST)] <- median_QRST
+sum(is.na(data_arrhythmia$QRST))
+
+#T column
+
+imputed_data_t <- kNN(data_arrhythmia, variable='T', k=5)
+data_arrhythmia <- imputed_data_t
+sum(is.na(data_arrhythmia$T))
+
+NZVfingerprints <- nearZeroVar(data_arrhythmia)
+noNZVfingerprints <- data_arrhythmia[,-NZVfingerprints]
+print(str(noNZVfingerprints))
+
+high_Cor<-findCorrelation(cor(noNZVfingerprints),cutoff = 0.60)
+noNZVfingerprints<-noNZVfingerprints[,-high_Cor]
+dim(noNZVfingerprints)
+#6.2 c
+# stratified random sample splitting with 75% training and 25% testing
+
+filtered_data$diagnosis <-make.names(filtered_data$diagnosis,unique = FALSE,allow_ = FALSE)
+filtered_data$diagnosis<-as.factor(filtered_data$diagnosis)
+#class(noNZVfingerprints$diagnosis)
+set.seed(1234)
+folds <- createFolds(filtered_data$diagnosis, k = 5, list = TRUE, returnTrain = FALSE)
+
+# Perform cross-validation
+for (fold in seq_along(folds)) {
+  # Extract indices for the current fold
+  test_indices <- unlist(folds[[fold]])
+}
+
+#train_Rows = createDataPartition(data_arrhythmia, p = .7, list= FALSE,strata = as.factor(data_arrhythmia$diagnosis))
+train_Fprints <- noNZVfingerprints[-test_indices,]
+train_Permeability <- factor(filtered_data[-test_indices,280])
+test_Fprints <- noNZVfingerprints[test_indices,]
+test_Permeability <- factor(filtered_data[test_indices,280])
+ctrl <- trainControl(method = "repeatedcv", repeats=3, number = 3)
+
+
+# PLS Model
+permeabiltyPLS <- train(x = train_Fprints , y = train_Permeability,
+                  preProcess = c("center","scale"), method = "pls",
+                  metric="Kappa",
+                  tuneGrid = expand.grid(ncomp = 1:15), trControl = ctrl)
+
+print(permeabiltyPLS)
+plot(permeabiltyPLS,main = "PLS Tuning Parameter for Permeability Data")
+        
+predictPLS <- predict(permeabiltyPLS,newdata=test_Fprints)
+confusionMatrix(predictPLS,test_Permeability)
+
+
+#Logistic
+set.seed(124)
+ctrl <- trainControl(method = "LGOCV",
+                     summaryFunction = defaultSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+
+logModel <- train(x=train_Fprints,y=train_Permeability,method = "multinom",
+                  metric = "Kappa", trControl = ctrl)
+
+print(logModel)
+confMatrixLog <- confusionMatrix(logModel$pred$pred, logModel$pred$obs)
+print(confMatrixLog)
+plot(logModel)
+summary(logModel)
+
+#LDA
+ldaTune<-train(x=train_Fprints,y=train_Permeability,method = "lda",
+               metric = "Kappa",trControl = ctrl)
+ldaTune
+plot(ldaTune)
+ldaPred<-predict(ldaTune,newdata = test_Fprints)
+confusionMatrix(ldaPred,test_Permeability)
+
+#GLMnet
+glmnGrid <- expand.grid(.alpha=c(0,.1,.2,.4),.lambda=seq(.01,0.2,length=5))
+set.seed(369)
+glmn_Tune<-train(x=train_Fprints,y=train_Permeability,method = "glmnet",tuneGrid =
+                        glmnGrid,
+                      metric = "Kappa",trControl = ctrl)
+
+glmn_Tune
+plot(glmn_Tune)
+glmPred<-predict(glmn_Tune,newdata = test_Fprints)
+confusionMatrix(glmPred,test_Permeability)
+
+#NON Linear
+#mda
+ctrl <- trainControl(summaryFunction = defaultSummary,
+                     classProbs = TRUE)
+set.seed(476)
+mdaFit <- train(x = train_Fprints, 
+                y = train_Permeability,
+                method = "mda",
+                metric = "Kappa",
+                tuneGrid = expand.grid(.subclasses = 1:10),
+                trControl = ctrl)
+mdaFit
+plot(mdaFit)
+mdaPred<-predict(mdaFit,newdata = test_Fprints)
+print(confusionMatrix(mdaPred,test_Permeability))
+
+#qda
+qdaFit <- train(x = train_Fprints, 
+                y = train_Permeability,
+                method = "qda",
+                metric = "Kappa",
+               tuneGrid = expand.grid(.subclasses = 1:10),
+                trControl = ctrl)
+qdaFit
+
+#rda
+rdaFit <- train(x = train_Fprints, 
+                y = train_Permeability,
+                method = "rda",
+                metric = "Kappa",
+                tuneGrid = expand.grid(.subclasses = 1:10),
+                trControl = ctrl)
